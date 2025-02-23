@@ -1,0 +1,63 @@
+{% extends "admin/change_form.html" %}
+
+{% block after_related_objects %}
+  {{ block.super }}
+
+  <h2>Добавить ингредиент</h2>
+  <form id="ingredient-form">
+    {% csrf_token %}
+    {{ ingredient_form.as_p }}
+    <button type="button" id="add-ingredient-btn" class="default">Добавить ингредиент</button>
+  </form>
+
+  <h3>Добавленные ингредиенты</h3>
+  <ul id="ingredient-list">
+    {% for ingredient in added_ingredients %}
+      <li>{{ ingredient.product_title }} - {{ ingredient.grams }} г</li>
+    {% empty %}
+      <li>Ингредиенты еще не добавлены</li>
+    {% endfor %}
+  </ul>
+
+  <script>
+    document.getElementById("add-ingredient-btn").addEventListener("click", function() {
+        let productField = document.querySelector("select[name='new_product']");
+        let gramsField = document.querySelector("input[name='grams']");
+        let productTitle = productField.value;
+        let grams = gramsField.value;
+
+        if (!productTitle || !grams) {
+            alert("Выберите продукт и укажите граммовку!");
+            return;
+        }
+
+        fetch("{% url 'admin:add_ingredient' %}", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": document.querySelector("[name=csrfmiddlewaretoken]").value
+            },
+            body: JSON.stringify({
+                "product_title": productTitle,
+                "grams": grams
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                let ingredientList = document.getElementById("ingredient-list");
+                ingredientList.innerHTML = "";
+                data.ingredients.forEach(ingredient => {
+                    let li = document.createElement("li");
+                    li.textContent = `${ingredient.product_title} - ${ingredient.grams} г`;
+                    ingredientList.appendChild(li);
+                });
+                gramsField.value = "";
+            } else {
+                alert("Ошибка: " + data.error);
+            }
+        })
+        .catch(error => console.error("Ошибка:", error));
+    });
+  </script>
+{% endblock %}

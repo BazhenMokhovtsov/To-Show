@@ -1,0 +1,148 @@
+version: "3"
+
+services:
+    django:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        container_name: django
+        working_dir: /app
+        env_file:
+            - docker/env/.env.prod
+        command: bash -c "python manage.py collectstatic --no-input &&
+                        python manage.py migrate &&
+                        python manage.py runserver 0.0.0.0:8000"
+        volumes:
+            - ./:/app:rw
+            - static:/app/static
+            - media:/app/media
+        expose:
+            - "8000"
+        restart: on-failure
+        depends_on:
+            - postgres
+            - redis
+        networks:
+            - web_network
+
+    postgres:
+        image: postgres:latest
+        env_file:
+            - docker/env/.env.prod
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        restart: on-failure
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U admin_qm -d quick_meals_db"]
+            interval: 5s
+            timeout: 3s
+            retries: 3
+        networks:
+            - web_network
+
+        
+    redis:
+        image: redis:alpine
+        container_name: redis
+        env_file:
+            - docker/env/.env.prod
+        command: >
+            redis-server 
+            --save ""
+            --appendonly no
+            --maxmemory 100mb
+            --maxmemory-policy allkeys-lru
+            --notify-keyspace-events Ex
+        expose:
+            - 6379
+        volumes:
+            - ./docker/redis/data:/data
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 2s
+            retries: 5
+        restart: on-failure
+        networks:
+            - web_network
+
+
+    celery_system:
+        build: .
+        container_name: celery-system-worker
+        env_file:
+            - docker/env/.env.prod
+        command: celery -A system worker -B -l info --logfile=./docker/logs/celery-system-worker.log --concurrency=5
+        working_dir: /app
+        volumes:
+            - ./:/app
+            - media:/app/media
+        restart: on-failure
+        depends_on:
+            - django
+            - redis
+        networks:
+            - web_network
+
+    
+    celery_generator:
+        build: .
+        container_name: celery-generator-worker
+        working_dir: /app
+        env_file:
+            - docker/env/.env.prod
+        command: celery -A system worker -l info --logfile=./docker/logs/celery-generator-worker.log --concurrency=20 -n=worker_gen_1 --hostname=worker2@%h --queues=generate_menu_queue --prefetch-multiplier=4 --soft-time-limit=200 --time-limit=300
+        volumes:
+            - ./:/app
+            - media:/app/media
+        restart: on-failure
+        depends_on:
+            - django
+            - redis
+        networks:
+            - web_network
+
+    nginx:
+        image: nginx:stable-alpine
+        container_name: nginx
+        working_dir: /app
+        restart: on-failure
+        user: root
+        ports:
+            - "80:80"
+            - "443:443"
+        volumes:
+            - static:/app/static:ro
+            - media:/app/media:ro
+            - ./docker/nginx/prod/:/etc/nginx/conf.d:ro
+            - ./docker/certbot/conf:/etc/letsencrypt:ro
+            - ./docker/certbot/www:/var/www/certbot:rw
+        depends_on:
+            - django
+        networks:
+            - web_network
+
+    certbot:
+        image: certbot/certbot
+        container_name: certbot
+        restart: on-failure
+        user: root
+        entrypoint: /bin/sh
+        command: -c "while true; do certbot renew; sleep 12h; done"
+        volumes:
+            - ./docker/certbot/conf:/etc/letsencrypt:rw
+            - ./docker/certbot/www:/var/www/certbot:rw
+        depends_on:
+            - nginx
+        networks:
+            - web_network
+            
+
+volumes:
+    postgres_data:
+    static:
+    media:
+
+networks:
+    web_network:
+        driver: bridge

@@ -1,0 +1,160 @@
+version: "3"
+
+services:
+    django:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        container_name: django
+        working_dir: /app
+        env_file:
+            - docker/env/.env.dev
+        command: bash -c "python manage.py collectstatic --no-input &&
+                        python manage.py migrate &&
+                        python manage.py runserver 0.0.0.0:8000"
+        volumes:
+            - ./:/app
+            - static:/app/static
+            - media:/app/media
+        ports:
+            - "8000:8000"
+        restart: always
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        networks:
+            - web_network
+
+    postgres:
+        image: postgres:latest
+        env_file:
+            - docker/env/.env.dev
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        restart: always
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U admin -d menu_generator_db"]
+            interval: 5s
+            timeout: 3s
+            retries: 3
+        networks:
+            - web_network
+
+        
+    redis:
+        image: redis:alpine
+        container_name: redis
+        env_file:
+            - docker/env/.env.dev
+        expose:
+            - 6379
+        volumes:
+            - ./docker/redis/data:/data
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 2s
+            retries: 5
+        restart: always
+        networks:
+            - web_network
+
+
+    celery_system:
+        build: .
+        container_name: celery-system-worker
+        env_file:
+            - docker/env/.env.dev
+        command: celery -A system worker -B -l info --logfile=./docker/logs/celery-system-worker.log --concurrency=5
+        working_dir: /app
+        volumes:
+            - ./:/app
+            - media:/app/media
+        restart: always
+        depends_on:
+            - django
+            - redis
+        networks:
+            - web_network
+
+    
+    celery_generator:
+        build: .
+        container_name: celery-generator-worker
+        working_dir: /app
+        env_file:
+            - docker/env/.env.dev
+        command: celery -A system worker -l info --logfile=./docker/logs/celery-generator-worker.log --concurrency=20 -n=worker_gen_1 --hostname=worker2@%h --queues=generate_menu_queue --prefetch-multiplier=4 --soft-time-limit=200 --time-limit=300
+        volumes:
+            - ./:/app
+            - media:/app/media
+        restart: always
+        depends_on:
+            - django
+            - redis
+        networks:
+            - web_network
+
+
+    data_loader:
+        build: .
+        container_name: db_data_loader
+        working_dir: /app
+        env_file:
+            - docker/env/.env.dev
+        command: >
+            bash -c "
+                # Убедимся, что контейнер и OS поддерживают apt-get.
+                # Если образ Alpine — замените на apk update && apk add netcat-openbsd
+                apt-get update &&
+                apt-get install -y netcat-openbsd &&
+
+                echo 'Ожидаем разворачивания Django-сервера...' &&
+                while ! nc -z django 8000; do
+                sleep 1
+                done &&
+
+                echo 'Django доступен! Запускаем loaddata...' &&
+                python manage.py loaddata dumps/user.json &&
+                python manage.py loaddata dumps/dump_products_categories.json &&
+                python manage.py loaddata dumps/dump_products.json &&
+                python manage.py loaddata dumps/dump_recipe_category.json &&
+                python manage.py loaddata dumps/generated_recipes.json 
+            "
+        volumes:
+            - .:/app
+        depends_on:
+            - django
+            - postgres
+        networks:
+            - web_network
+
+    nginx:
+        image: nginx:stable-alpine
+        container_name: nginx
+        working_dir: /app
+        restart: always
+        ports:
+            - "80:80"
+        volumes:
+            - static:/app/static
+            - media:/app/media
+            - ./docker/nginx/dev/:/etc/nginx/conf.d:ro
+        links:
+            - django
+        depends_on:
+            - django
+        networks:
+            - web_network
+
+volumes:
+    postgres_data:
+    static:
+    media:
+
+networks:
+    web_network:
+        driver: bridge
+
